@@ -9,13 +9,16 @@ import { debugging } from "./debugging.js";
  *
  * @param count - The number of outputs.
  * @param input - The input ReadableStream.
+ * @param queueingStrategy - Please see the queueingStrategy parameter for the
+ *   ReadableStream constructor.
  * @returns An array of output ReadableStreams.
  */
 export function slowTee<T>(
   count: number,
-  input: ReadableStream<T>
+  input: ReadableStream<T>,
+  queueingStrategy?: QueuingStrategy<T>
 ): ReadableStream<T>[] {
-  return new SlowTee(count, input).outputs;
+  return new SlowTee(count, input, queueingStrategy).outputs;
 }
 
 /**
@@ -76,7 +79,11 @@ class SlowTee<T> {
    */
   outputs: ReadableStream<T>[];
 
-  constructor(count: number, input: ReadableStream<T>) {
+  constructor(
+    count: number,
+    input: ReadableStream<T>,
+    queueingStrategy?: QueuingStrategy<T>
+  ) {
     this.count = Math.trunc(count);
     this.reader = input.getReader();
 
@@ -98,21 +105,24 @@ class SlowTee<T> {
     for (let ix = 0; ix < this.count; ++ix) {
       this.allOutputsMask = setBit(this.allOutputsMask, ix);
       const this_ = this;
-      this.outputs[ix] = new ReadableStream<T>({
-        async pull(controller) {
-          const { value, done } = await this_.pull(ix);
+      this.outputs[ix] = new ReadableStream<T>(
+        {
+          async pull(controller) {
+            const { value, done } = await this_.pull(ix);
 
-          if (done) {
-            controller.close();
-            return;
-          }
+            if (done) {
+              controller.close();
+              return;
+            }
 
-          controller.enqueue(value);
+            controller.enqueue(value);
+          },
+          cancel(): void {
+            this_.cancel(ix);
+          },
         },
-        cancel(): void {
-          this_.cancel(ix);
-        },
-      });
+        queueingStrategy
+      );
     }
   }
 
