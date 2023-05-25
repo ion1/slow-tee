@@ -145,34 +145,7 @@ class SlowTee<T> {
   initiateRead(): void {
     if (debugging) this.dumpState("initiateRead");
 
-    if (this.currValue != null) {
-      throw new Error(
-        [
-          `SlowTee: initiateRead called but there is a current value.`,
-          `currValue=${JSON.stringify(this.currValue)}`,
-        ].join(" ")
-      );
-    }
-
-    if (this.currBlockingMask !== 0) {
-      // This should never be the case if currValue is null.
-      throw new Error(
-        [
-          `SlowTee: initiateRead called but there are current blockers.`,
-          `currBlockingMask=${this.currBlockingMask.toString(2)}`,
-        ].join(" ")
-      );
-    }
-
-    if (this.nextWaitingMask === 0) {
-      // There should be someone waiting for this value.
-      throw new Error(
-        [
-          `SlowTee: initiateRead called but there are no next waiters.`,
-          `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-        ].join(" ")
-      );
-    }
+    this.checkReadInvariants();
 
     this.reader.read().then(
       (value) => {
@@ -188,26 +161,7 @@ class SlowTee<T> {
     if (debugging)
       this.dumpState(`readFinished result=${JSON.stringify(result)}`);
 
-    if (this.currValue != null) {
-      // A read should never have been initiated.
-      throw new Error(
-        "SlowTee: readFinished called but there is a current value"
-      );
-    }
-
-    if (this.currBlockingMask !== 0) {
-      // This should never be the case if currValue is null.
-      throw new Error(
-        "SlowTee: readFinished called but there are current blockers"
-      );
-    }
-
-    if (this.nextWaitingMask === 0) {
-      // There should be someone waiting for this value.
-      throw new Error(
-        "SlowTee: readFinished called but there are no next waiters"
-      );
-    }
+    this.checkReadInvariants();
 
     this.currBlockingMask = this.allOutputsMask;
     this.currValue = result;
@@ -244,6 +198,45 @@ class SlowTee<T> {
           `SlowTee: Invariant violated:`,
           `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
           `but it should be zero after the handler loop`,
+        ].join(" ")
+      );
+    }
+  }
+
+  /**
+   * Check the invariants which should hold when either initiateRead or
+   * readFinished is called.
+   */
+  checkReadInvariants(): void {
+    if (this.currValue != null) {
+      // A read should never have been initiated.
+      throw new Error(
+        [
+          `SlowTee: Invariant violated:`,
+          `initiateRead called but there is a current value.`,
+          `currValue=${JSON.stringify(this.currValue)}`,
+        ].join(" ")
+      );
+    }
+
+    if (this.currBlockingMask !== 0) {
+      // This should never be the case if currValue is null.
+      throw new Error(
+        [
+          `SlowTee: Invariant violated:`,
+          `initiateRead called but there are current blockers.`,
+          `currBlockingMask=${this.currBlockingMask.toString(2)}`,
+        ].join(" ")
+      );
+    }
+
+    if (this.nextWaitingMask === 0) {
+      // There should be someone waiting for this value.
+      throw new Error(
+        [
+          `SlowTee: Invariant violated:`,
+          `initiateRead called but there are no next waiters.`,
+          `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
         ].join(" ")
       );
     }
