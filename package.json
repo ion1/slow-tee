@@ -1,7 +1,8 @@
 {
   "name": "slow-tee",
   "version": "0.0.1",
-  "description": "",
+  "description": "Distribute the input from a ReadableStream into a number of outputs at the pace of the slowest output, avoiding the possible unbounded memory usage of ReadableStream tee().",
+  "homepage": "https://github.com/ion1/slow-tee",
   "type": "module",
   "scripts": {
     "build": "tsc",
