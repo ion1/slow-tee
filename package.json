@@ -1,0 +1,17 @@
+{
+  "name": "slow-tee",
+  "version": "0.0.1",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Johan Kiviniemi",
+  "license": "MIT",
+  "devDependencies": {
+    "@tsconfig/strictest": "^2.0.1",
+    "typescript": "^5.0.4"
+  }
+}
