@@ -2,6 +2,15 @@ import { testBit, clearBit, setBit } from "./bits.js";
 
 import { debugging } from "./debugging.js";
 
+/**
+ * Distribute the input from a ReadableStream into a number of outputs at the
+ * pace of the slowest output, avoiding the possible unbounded memory usage of
+ * ReadableStream tee().
+ *
+ * @param count - The number of outputs.
+ * @param input - The input ReadableStream.
+ * @returns An array of output ReadableStreams.
+ */
 export function slowTee<T>(
   count: number,
   input: ReadableStream<T>
@@ -9,6 +18,9 @@ export function slowTee<T>(
   return new SlowTee(count, input).outputs;
 }
 
+/**
+ * A value corresponding to the result from a read on a ReadableStream reader.
+ */
 type SuccessOrFailure<T> =
   | {
       success: true;
@@ -19,19 +31,49 @@ type SuccessOrFailure<T> =
       reason: any;
     };
 
+/**
+ * The resolve and reject functions for fulfilling a Promise.
+ */
 type PromiseHandler<T> = {
   resolve: (value: ReadableStreamReadResult<T>) => void;
   reject: (reason: any) => void;
 };
 
+/**
+ * Distribute the input from a ReadableStream into a number of outputs at the
+ * pace of the slowest output, avoiding the possible unbounded memory usage of
+ * ReadableStream tee().
+ */
 class SlowTee<T> {
+  /** The number of outputs. */
   count: number;
+  /** The input reader. */
   reader: ReadableStreamDefaultReader<T>;
+  /** A bitmask corresponding to all uncancelled outputs. */
   allOutputsMask: number;
+  /**
+   * A bitmask corresponding to the currently blocking outputs (ones who did
+   * not pull since a value became available).
+   */
   currBlockingMask: number;
+  /**
+   * The result from the last read from the input, or null if a read has not
+   * been done or one has not completed yet.
+   */
   currValue: SuccessOrFailure<T> | null;
+  /**
+   * A bitmask corresponding to the outputs which have pulled and are waiting
+   * for a new value.
+   */
   nextWaitingMask: number;
+  /**
+   * The promise handlers for the outputs which have pulled and are waiting for
+   * a new value.
+   */
   nextPromiseHandlers: (PromiseHandler<T> | null)[];
+  /**
+   * The ReadableStream values for the outputs.
+   */
   outputs: ReadableStream<T>[];
 
   constructor(count: number, input: ReadableStream<T>) {
