@@ -67,6 +67,9 @@ class SlowTee<T> {
 
           controller.enqueue(value);
         },
+        cancel(): void {
+          this_.cancel(ix);
+        },
       });
     }
   }
@@ -274,6 +277,27 @@ class SlowTee<T> {
       handler.resolve(value.value);
     } else {
       handler.reject(value.reason);
+    }
+  }
+
+  cancel(ix: number): void {
+    if (debugging) this.dumpState(`cancel ix=${ix}`);
+
+    const oldCurrBlockingMask = this.currBlockingMask;
+
+    this.allOutputsMask = clearBit(this.allOutputsMask, ix);
+
+    this.currBlockingMask = clearBit(this.currBlockingMask, ix);
+    if (this.currBlockingMask === 0) this.currValue = null;
+
+    this.nextWaitingMask = clearBit(this.nextWaitingMask, ix);
+    this.nextPromiseHandlers[ix] = null;
+
+    const finalBlockerRemoved =
+      oldCurrBlockingMask !== 0 && this.currBlockingMask === 0;
+
+    if (finalBlockerRemoved && this.nextWaitingMask !== 0) {
+      this.initiateRead();
     }
   }
 }
