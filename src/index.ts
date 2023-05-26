@@ -145,7 +145,7 @@ class SlowTee<T> {
   initiateRead(): void {
     if (debugging) this.dumpState("initiateRead");
 
-    this.checkReadInvariants();
+    this.checkReadInvariants("initiateRead");
 
     this.reader.read().then(
       (value) => {
@@ -161,7 +161,7 @@ class SlowTee<T> {
     if (debugging)
       this.dumpState(`readFinished result=${JSON.stringify(result)}`);
 
-    this.checkReadInvariants();
+    this.checkReadInvariants("readFinished");
 
     this.currBlockingMask = this.allOutputsMask;
     this.currValue = result;
@@ -206,14 +206,17 @@ class SlowTee<T> {
   /**
    * Check the invariants which should hold when either initiateRead or
    * readFinished is called.
+   *
+   * @param callerName - The name of the method that is calling
+   *   checkReadInvariants.
    */
-  checkReadInvariants(): void {
+  checkReadInvariants(callerName: string): void {
     if (this.currValue != null) {
       // A read should never have been initiated.
       throw new Error(
         [
           `SlowTee: Invariant violated:`,
-          `initiateRead called but there is a current value.`,
+          `${callerName} called but there is a current value.`,
           `currValue=${JSON.stringify(this.currValue)}`,
         ].join(" ")
       );
@@ -224,7 +227,7 @@ class SlowTee<T> {
       throw new Error(
         [
           `SlowTee: Invariant violated:`,
-          `initiateRead called but there are current blockers.`,
+          `${callerName} called but there are current blockers.`,
           `currBlockingMask=${this.currBlockingMask.toString(2)}`,
         ].join(" ")
       );
@@ -235,7 +238,7 @@ class SlowTee<T> {
       throw new Error(
         [
           `SlowTee: Invariant violated:`,
-          `initiateRead called but there are no next waiters.`,
+          `${callerName} called but there are no next waiters.`,
           `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
         ].join(" ")
       );
