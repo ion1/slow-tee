@@ -71,6 +71,9 @@ export class SlowTee<OutputName, T> {
         `Output already exists with the name ${JSON.stringify(outputName)}`
       );
 
+    if (debugging)
+      console.debug(`SlowTee: Adding output: ${JSON.stringify(outputName)}`);
+
     const stream = new ReadableStream<T>(
       {
         pull: async (controller) => {
