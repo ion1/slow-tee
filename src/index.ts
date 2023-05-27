@@ -1,6 +1,14 @@
-import { testBit, clearBit, setBit } from "./bits.js";
-
 import { debugging } from "./debugging.js";
+import { SlowTeeError } from "./error.js";
+import {
+  State,
+  BlockedState,
+  ReadResult,
+  PromiseHandler,
+  dispatchState,
+  stateToString,
+  readResultToString,
+} from "./state.js";
 
 /**
  * Distribute the input from a ReadableStream into a number of outputs at the
@@ -18,29 +26,9 @@ export function slowTee<T>(
   input: ReadableStream<T>,
   queueingStrategy?: QueuingStrategy<T>
 ): ReadableStream<T>[] {
-  return new SlowTee(count, input, queueingStrategy).outputs;
+  const instance = new SlowTee(count, input, queueingStrategy);
+  return Array.from(instance.outputs.values());
 }
-
-/**
- * A value corresponding to the result from a read on a ReadableStream reader.
- */
-type SuccessOrFailure<T> =
-  | {
-      success: true;
-      value: ReadableStreamReadResult<T>;
-    }
-  | {
-      success: false;
-      reason: any;
-    };
-
-/**
- * The resolve and reject functions for fulfilling a Promise.
- */
-type PromiseHandler<T> = {
-  resolve: (value: ReadableStreamReadResult<T>) => void;
-  reject: (reason: any) => void;
-};
 
 /**
  * Distribute the input from a ReadableStream into a number of outputs at the
@@ -48,67 +36,28 @@ type PromiseHandler<T> = {
  * ReadableStream tee().
  */
 class SlowTee<T> {
-  /** The number of outputs. */
-  count: number;
   /** The input reader. */
   reader: ReadableStreamDefaultReader<T>;
-  /** A bitmask corresponding to all uncancelled outputs. */
-  allOutputsMask: number;
-  /**
-   * A bitmask corresponding to the currently blocking outputs (ones who did
-   * not pull since a value became available).
-   */
-  currBlockingMask: number;
-  /**
-   * The result from the last read from the input, or null if a read has not
-   * been done or one has not completed yet.
-   */
-  currValue: SuccessOrFailure<T> | null;
-  /**
-   * A bitmask corresponding to the outputs which have pulled and are waiting
-   * for a new value.
-   */
-  nextWaitingMask: number;
-  /**
-   * The promise handlers for the outputs which have pulled and are waiting for
-   * a new value.
-   */
-  nextPromiseHandlers: (PromiseHandler<T> | null)[];
-  /**
-   * The ReadableStream values for the outputs.
-   */
-  outputs: ReadableStream<T>[];
+  /** The ReadableStream values for the uncancelled outputs. */
+  outputs: Map<number, ReadableStream<T>>;
+  /** The state of the finite state machine. */
+  state: State<T>;
 
   constructor(
     count: number,
     input: ReadableStream<T>,
     queueingStrategy?: QueuingStrategy<T>
   ) {
-    this.count = Math.trunc(count);
     this.reader = input.getReader();
 
-    if (!(1 <= this.count && this.count <= 32)) {
-      throw new RangeError(
-        `count must be between 1 and 32, got ${JSON.stringify(this.count)}`
-      );
-    }
+    // Construct a ReadableStream for each output.
+    this.outputs = new Map();
 
-    this.allOutputsMask = 0;
-
-    this.currBlockingMask = 0;
-    this.currValue = null;
-
-    this.nextWaitingMask = 0;
-    this.nextPromiseHandlers = Array(this.count);
-
-    this.outputs = Array(this.count);
-    for (let ix = 0; ix < this.count; ++ix) {
-      this.allOutputsMask = setBit(this.allOutputsMask, ix);
-      const this_ = this;
-      this.outputs[ix] = new ReadableStream<T>(
+    for (let ix = 0; ix < count; ++ix) {
+      const stream = new ReadableStream<T>(
         {
-          async pull(controller) {
-            const { value, done } = await this_.pull(ix);
+          pull: async (controller) => {
+            const { value, done } = await this.pull(ix);
 
             if (done) {
               controller.close();
@@ -117,235 +66,234 @@ class SlowTee<T> {
 
             controller.enqueue(value);
           },
-          cancel(): void {
-            this_.cancel(ix);
+          cancel: () => {
+            this.cancel(ix);
           },
         },
         queueingStrategy
       );
+
+      this.outputs.set(ix, stream);
     }
-  }
 
-  dumpState(message: string): void {
-    if (!debugging) return;
-
-    console.debug(
-      `SlowTee: ${message}:`,
-      `count=${this.count}`,
-      `allOutputsMask=${this.allOutputsMask.toString(2)}`,
-      `currBlockingMask=${this.currBlockingMask.toString(2)}`,
-      `currValue=${JSON.stringify(this.currValue)}`,
-      `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-      `nextPromiseHandlers=${JSON.stringify(
-        this.nextPromiseHandlers?.map((h) => (h ? "(h)" : null))
-      )}`
-    );
-  }
-
-  initiateRead(): void {
-    if (debugging) this.dumpState("initiateRead");
-
-    this.checkReadInvariants("initiateRead");
-
-    this.reader.read().then(
-      (value) => {
-        this.readFinished({ success: true, value });
-      },
-      (reason) => {
-        this.readFinished({ success: false, reason });
-      }
-    );
-  }
-
-  readFinished(result: SuccessOrFailure<T>): void {
+    this.state = { id: "idle" };
     if (debugging)
-      this.dumpState(`readFinished result=${JSON.stringify(result)}`);
+      console.debug(`SlowTee: State: ${stateToString(this.state)}`);
+  }
 
-    this.checkReadInvariants("readFinished");
+  /**
+   * Enter the given state. Runs possible on-entry actions and updates the
+   * state member variable.
+   */
+  enter(state: State<T>): void {
+    if (debugging)
+      console.debug(`SlowTee: Entering state: ${stateToString(state)}`);
 
-    this.currBlockingMask = this.allOutputsMask;
-    this.currValue = result;
+    this.state = state;
 
-    for (let ix = 0; ix < this.count; ++ix) {
-      if (testBit(this.nextWaitingMask, ix)) {
-        const handler = this.nextPromiseHandlers[ix];
-        if (handler == null) {
-          throw new Error(
-            [
-              `SlowTee: Invariant violated:`,
-              `ix=${ix}`,
-              `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-              `nextPromiseHandlers=${JSON.stringify(
-                this.nextPromiseHandlers?.map((h) => (h ? "(h)" : null))
-              )}`,
-            ].join(" ")
-          );
-        }
+    dispatchState(state, {
+      reading: () => {
+        if (debugging) console.debug(`SlowTee: Initiating read`);
 
-        this.currBlockingMask = clearBit(this.currBlockingMask, ix);
-        if (this.currBlockingMask === 0) this.currValue = null;
+        this.reader.read().then(
+          (chunk) => {
+            this.readFinished({ success: true, chunk });
+          },
+          (reason) => {
+            this.readFinished({ success: false, reason });
+          }
+        );
+      },
 
-        this.nextWaitingMask = clearBit(this.nextWaitingMask, ix);
-        this.nextPromiseHandlers[ix] = null;
+      // Nothing to do when entering.
+      idle: () => {},
+      blocked: () => {},
+    });
+  }
 
-        this.handlePromise(ix, handler, result);
+  /**
+   * To be called when a read initiated by the Reading state on-entry code
+   * finishes.
+   */
+  readFinished(result: ReadResult<T>): void {
+    if (debugging)
+      console.debug(`SlowTee: Read finished: ${readResultToString(result)}`);
+
+    switch (this.state.id) {
+      case "reading":
+        // Acceptable to continue.
+        break;
+
+      case "idle":
+      case "blocked":
+        throw new SlowTeeError(
+          "Internal error: readFinished called while in state: " +
+            stateToString(this.state)
+        );
+
+      default: {
+        const impossible: never = this.state;
+        throw new SlowTeeError(
+          `Impossible state: ${JSON.stringify(impossible)}`
+        );
       }
     }
 
-    if (this.nextWaitingMask !== 0) {
-      throw new Error(
-        [
-          `SlowTee: Invariant violated:`,
-          `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-          `but it should be zero after the handler loop`,
-        ].join(" ")
-      );
+    // In the next state, every output which did not pull yet will be a
+    // blocker.
+    const nextBlockers = new Set(this.outputs.keys());
+
+    // Immediately fulfill the pulls for the waiters.
+    for (const [ix, handler] of this.state.waiters) {
+      this.fulfillPromise(ix, handler, result);
+
+      // These waiters will not be blockers in the next state as their pulls
+      // have already been fulfilled.
+      nextBlockers.delete(ix);
+
+      // There is no need to delete the waiters from the map because the map
+      // will be discarded on the next state transition.
+    }
+
+    if (nextBlockers.size === 0) {
+      // There are no blockers.
+      this.enter({ id: "idle" });
+    } else {
+      // There are one or more blockers.
+      this.enter({
+        id: "blocked",
+        readResult: result,
+        blockers: nextBlockers,
+        // Do not use this.state.waiters, those have been fulfilled already.
+        nextWaiters: new Map(),
+      });
     }
   }
 
   /**
-   * Check the invariants which should hold when either initiateRead or
-   * readFinished is called.
-   *
-   * @param callerName - The name of the method that is calling
-   *   checkReadInvariants.
+   * To be called when one of the outputs is trying to pull.
    */
-  checkReadInvariants(callerName: string): void {
-    if (this.currValue != null) {
-      // A read should never have been initiated.
-      throw new Error(
-        [
-          `SlowTee: Invariant violated:`,
-          `${callerName} called but there is a current value.`,
-          `currValue=${JSON.stringify(this.currValue)}`,
-        ].join(" ")
-      );
-    }
-
-    if (this.currBlockingMask !== 0) {
-      // This should never be the case if currValue is null.
-      throw new Error(
-        [
-          `SlowTee: Invariant violated:`,
-          `${callerName} called but there are current blockers.`,
-          `currBlockingMask=${this.currBlockingMask.toString(2)}`,
-        ].join(" ")
-      );
-    }
-
-    if (this.nextWaitingMask === 0) {
-      // There should be someone waiting for this value.
-      throw new Error(
-        [
-          `SlowTee: Invariant violated:`,
-          `${callerName} called but there are no next waiters.`,
-          `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-        ].join(" ")
-      );
-    }
-  }
-
   pull(ix: number): Promise<ReadableStreamReadResult<T>> {
-    if (debugging) this.dumpState(`pull ix=${ix}`);
+    if (debugging) console.debug(`SlowTee: Pull from output ix=${ix}`);
 
     return new Promise((resolve, reject) => {
-      const oldCurrBlockingMask = this.currBlockingMask;
-      const oldNextWaitingMask = this.nextWaitingMask;
+      const handler = { resolve, reject };
 
-      if (testBit(this.currBlockingMask, ix)) {
-        // There is a value, this reader is pulling it now. Resolve instantly.
+      dispatchState(this.state, {
+        idle: () => {
+          // Initiate a read.
 
-        const value = this.currValue;
+          const waiters = new Map([[ix, handler]]);
 
-        if (value == null) {
-          // If currBlockingMask is non-zero, currValue must not be null.
-          throw new Error(
-            [
-              `SlowTee: Invariant violated:`,
-              `currBlockingMask=${this.currBlockingMask.toString(2)}`,
-              `currValue=${JSON.stringify(value)}`,
-            ].join(" ")
-          );
-        }
+          this.enter({ id: "reading", waiters });
+        },
+        reading: (state) => {
+          // A read has already been initiated. Just add to the waiters.
 
-        // Remove this ix from current blockers.
-        this.currBlockingMask = clearBit(this.currBlockingMask, ix);
-        if (this.currBlockingMask === 0) this.currValue = null;
+          if (state.waiters.has(ix))
+            throw new SlowTeeError(
+              `There is already a waiter with ix=${ix}. State: ` +
+                stateToString(state)
+            );
 
-        this.handlePromise(ix, { resolve, reject }, value);
-      } else {
-        // There is no value or the value has already been handled for this ix.
-        // Add to the next waiters.
+          state.waiters.set(ix, handler);
+        },
+        blocked: (state) => {
+          if (state.blockers.has(ix)) {
+            // The output was a blocker. Fulfill the pull and mark the output
+            // as not a blocker.
 
-        if (testBit(this.nextWaitingMask, ix)) {
-          throw new Error(
-            [
-              `SlowTee: Invariant violated:`,
-              `tried to add ix=${ix} to next waiting mask but it was already there.`,
-              `nextWaitingMask=${this.nextWaitingMask.toString(2)}`,
-            ].join(" ")
-          );
-        }
+            state.blockers.delete(ix);
 
-        if (this.nextPromiseHandlers[ix] != null) {
-          throw new Error(
-            [
-              `SlowTee: Invariant violated:`,
-              `tried to add ix=${ix} to next promise handlers but one was already there.`,
-            ].join(" ")
-          );
-        }
+            this.fulfillPromise(ix, handler, state.readResult);
+          } else {
+            // The output was not a blocker. It has already received the
+            // current read result and wants the result from the next read. Add
+            // it as a next waiter.
 
-        this.nextWaitingMask = setBit(this.nextWaitingMask, ix);
-        this.nextPromiseHandlers[ix] = { resolve, reject };
-      }
+            if (state.nextWaiters.has(ix))
+              throw new SlowTeeError(
+                `There is already a nextWaiter with ix=${ix}. State: ` +
+                  stateToString(state)
+              );
 
-      const finalBlockerRemoved =
-        oldCurrBlockingMask !== 0 && this.currBlockingMask === 0;
-      const firstWaiterAdded =
-        oldNextWaitingMask === 0 && this.nextWaitingMask !== 0;
+            state.nextWaiters.set(ix, handler);
+          }
 
-      if (
-        (finalBlockerRemoved && this.nextWaitingMask !== 0) ||
-        (firstWaiterAdded && this.currBlockingMask === 0)
-      ) {
-        this.initiateRead();
-      }
+          return this.exitBlockedIfNoBlockersRemain(state);
+        },
+      });
     });
   }
 
-  handlePromise(
-    ix: number,
-    handler: PromiseHandler<T>,
-    value: SuccessOrFailure<T>
-  ): void {
-    if (debugging) this.dumpState(`handlePromise ix=${ix}`);
+  /**
+   * To be called when one of the outputs wants to cancel.
+   */
+  cancel(ix: number): void {
+    if (debugging)
+      console.debug(`SlowTee: Cancel request from output ix=${ix}`);
 
-    if (value.success) {
-      handler.resolve(value.value);
+    this.outputs.delete(ix);
+
+    dispatchState(this.state, {
+      idle: () => {
+        // Nothing to do.
+      },
+      reading: (state) => {
+        state.waiters
+          .get(ix)
+          ?.reject(new SlowTeeError("Cancel requested during a pending pull"));
+        state.waiters.delete(ix);
+      },
+      blocked: (state) => {
+        state.blockers.delete(ix);
+
+        state.nextWaiters
+          .get(ix)
+          ?.reject(new SlowTeeError("Cancel requested during a pending pull"));
+        state.nextWaiters.delete(ix);
+
+        this.exitBlockedIfNoBlockersRemain(state);
+      },
+    });
+  }
+
+  /**
+   * If no blockers remain while in the blocked state, enter idle or initiate
+   * a read depending on whether there are waiters for the next read.
+   */
+  exitBlockedIfNoBlockersRemain(state: BlockedState<T>): void {
+    if (state.blockers.size > 0) return;
+
+    // There are no blockers left. Exit the blocked state.
+    if (state.nextWaiters.size === 0) {
+      // There are no waiters for the next read either.
+      return this.enter({ id: "idle" });
     } else {
-      handler.reject(value.reason);
+      // There are one or more waiters for the next read. Initiate a
+      // read.
+      return this.enter({ id: "reading", waiters: state.nextWaiters });
     }
   }
 
-  cancel(ix: number): void {
-    if (debugging) this.dumpState(`cancel ix=${ix}`);
+  /**
+   * Send a read result to an output by fulfilling the corresponding promise.
+   */
+  fulfillPromise(
+    ix: number,
+    handler: PromiseHandler<T>,
+    readResult: ReadResult<T>
+  ): void {
+    if (debugging)
+      console.debug(
+        `SlowTee: Sending to output ix=${ix}:`,
+        readResultToString(readResult)
+      );
 
-    const oldCurrBlockingMask = this.currBlockingMask;
-
-    this.allOutputsMask = clearBit(this.allOutputsMask, ix);
-
-    this.currBlockingMask = clearBit(this.currBlockingMask, ix);
-    if (this.currBlockingMask === 0) this.currValue = null;
-
-    this.nextWaitingMask = clearBit(this.nextWaitingMask, ix);
-    this.nextPromiseHandlers[ix] = null;
-
-    const finalBlockerRemoved =
-      oldCurrBlockingMask !== 0 && this.currBlockingMask === 0;
-
-    if (finalBlockerRemoved && this.nextWaitingMask !== 0) {
-      this.initiateRead();
+    if (readResult.success) {
+      handler.resolve(readResult.chunk);
+    } else {
+      handler.reject(readResult.reason);
     }
   }
 }
