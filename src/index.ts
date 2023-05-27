@@ -41,22 +41,22 @@ export function slowTee<OutputName extends string | number | symbol, T>(
  * pace of the slowest output, avoiding the possible unbounded memory usage of
  * ReadableStream tee().
  */
-class SlowTee<OutputName, T> {
+export class SlowTee<OutputName, T> {
   /** The input reader. */
-  reader: ReadableStreamDefaultReader<T>;
+  #reader: ReadableStreamDefaultReader<T>;
   /** The ReadableStream values for the uncancelled outputs. */
-  outputs: Map<OutputName, ReadableStream<T>>;
+  #outputs: Map<OutputName, ReadableStream<T>>;
   /** The state of the finite state machine. */
-  state: State<OutputName, T>;
+  #state: State<OutputName, T>;
 
   constructor(input: ReadableStream<T>) {
-    this.reader = input.getReader();
+    this.#reader = input.getReader();
 
-    this.outputs = new Map();
+    this.#outputs = new Map();
 
-    this.state = { id: "idle" };
+    this.#state = { id: "idle" };
     if (debugging)
-      console.debug(`SlowTee: State: ${stateToString(this.state)}`);
+      console.debug(`SlowTee: State: ${stateToString(this.#state)}`);
   }
 
   /**
@@ -66,7 +66,7 @@ class SlowTee<OutputName, T> {
     outputName: OutputName,
     queuingStrategy?: QueuingStrategy<T>
   ): ReadableStream<T> {
-    if (this.outputs.has(outputName))
+    if (this.#outputs.has(outputName))
       throw new SlowTeeError(
         `Output already exists with the name ${JSON.stringify(outputName)}`
       );
@@ -74,7 +74,7 @@ class SlowTee<OutputName, T> {
     const stream = new ReadableStream<T>(
       {
         pull: async (controller) => {
-          const { value, done } = await this.pull(outputName);
+          const { value, done } = await this.#pull(outputName);
 
           if (done) {
             controller.close();
@@ -84,13 +84,13 @@ class SlowTee<OutputName, T> {
           controller.enqueue(value);
         },
         cancel: () => {
-          this.cancel(outputName);
+          this.#cancel(outputName);
         },
       },
       queuingStrategy
     );
 
-    this.outputs.set(outputName, stream);
+    this.#outputs.set(outputName, stream);
 
     return stream;
   }
@@ -99,22 +99,22 @@ class SlowTee<OutputName, T> {
    * Enter the given state. Runs possible on-entry actions and updates the
    * state member variable.
    */
-  enter(state: State<OutputName, T>): void {
+  #enter(state: State<OutputName, T>): void {
     if (debugging)
       console.debug(`SlowTee: Entering state: ${stateToString(state)}`);
 
-    this.state = state;
+    this.#state = state;
 
     dispatchState(state, {
       reading: () => {
         if (debugging) console.debug(`SlowTee: Initiating read`);
 
-        this.reader.read().then(
+        this.#reader.read().then(
           (chunk) => {
-            this.readFinished({ success: true, chunk });
+            this.#readFinished({ success: true, chunk });
           },
           (reason) => {
-            this.readFinished({ success: false, reason });
+            this.#readFinished({ success: false, reason });
           }
         );
       },
@@ -129,11 +129,11 @@ class SlowTee<OutputName, T> {
    * To be called when a read initiated by the Reading state on-entry code
    * finishes.
    */
-  readFinished(result: ReadResult<T>): void {
+  #readFinished(result: ReadResult<T>): void {
     if (debugging)
       console.debug(`SlowTee: Read finished: ${readResultToString(result)}`);
 
-    switch (this.state.id) {
+    switch (this.#state.id) {
       case "reading":
         // Acceptable to continue.
         break;
@@ -142,11 +142,11 @@ class SlowTee<OutputName, T> {
       case "blocked":
         throw new SlowTeeError(
           "Internal error: readFinished called while in state: " +
-            stateToString(this.state)
+            stateToString(this.#state)
         );
 
       default: {
-        const impossible: never = this.state;
+        const impossible: never = this.#state;
         throw new SlowTeeError(
           `Impossible state: ${JSON.stringify(impossible)}`
         );
@@ -155,11 +155,11 @@ class SlowTee<OutputName, T> {
 
     // In the next state, every output which did not pull yet will be a
     // blocker.
-    const nextBlockers = new Set(this.outputs.keys());
+    const nextBlockers = new Set(this.#outputs.keys());
 
     // Immediately fulfill the pulls for the waiters.
-    for (const [outputName, handler] of this.state.waiters) {
-      this.fulfillPromise(outputName, handler, result);
+    for (const [outputName, handler] of this.#state.waiters) {
+      this.#fulfillPromise(outputName, handler, result);
 
       // These waiters will not be blockers in the next state as their pulls
       // have already been fulfilled.
@@ -171,10 +171,10 @@ class SlowTee<OutputName, T> {
 
     if (nextBlockers.size === 0) {
       // There are no blockers.
-      this.enter({ id: "idle" });
+      this.#enter({ id: "idle" });
     } else {
       // There are one or more blockers.
-      this.enter({
+      this.#enter({
         id: "blocked",
         readResult: result,
         blockers: nextBlockers,
@@ -187,20 +187,20 @@ class SlowTee<OutputName, T> {
   /**
    * To be called when one of the outputs is trying to pull.
    */
-  pull(outputName: OutputName): Promise<ReadableStreamReadResult<T>> {
+  #pull(outputName: OutputName): Promise<ReadableStreamReadResult<T>> {
     if (debugging)
       console.debug(`SlowTee: Pull from output ${JSON.stringify(outputName)}`);
 
     return new Promise((resolve, reject) => {
       const handler = { resolve, reject };
 
-      dispatchState(this.state, {
+      dispatchState(this.#state, {
         idle: () => {
           // Initiate a read.
 
           const waiters = new Map([[outputName, handler]]);
 
-          this.enter({ id: "reading", waiters });
+          this.#enter({ id: "reading", waiters });
         },
         reading: (state) => {
           // A read has already been initiated. Just add to the waiters.
@@ -222,7 +222,7 @@ class SlowTee<OutputName, T> {
 
             state.blockers.delete(outputName);
 
-            this.fulfillPromise(outputName, handler, state.readResult);
+            this.#fulfillPromise(outputName, handler, state.readResult);
           } else {
             // The output was not a blocker. It has already received the
             // current read result and wants the result from the next read. Add
@@ -239,7 +239,7 @@ class SlowTee<OutputName, T> {
             state.nextWaiters.set(outputName, handler);
           }
 
-          return this.exitBlockedIfNoBlockersRemain(state);
+          return this.#exitBlockedIfNoBlockersRemain(state);
         },
       });
     });
@@ -248,15 +248,15 @@ class SlowTee<OutputName, T> {
   /**
    * To be called when one of the outputs wants to cancel.
    */
-  cancel(outputName: OutputName): void {
+  #cancel(outputName: OutputName): void {
     if (debugging)
       console.debug(
         `SlowTee: Cancel request from output ${JSON.stringify(outputName)}`
       );
 
-    this.outputs.delete(outputName);
+    this.#outputs.delete(outputName);
 
-    dispatchState(this.state, {
+    dispatchState(this.#state, {
       idle: () => {
         // Nothing to do.
       },
@@ -274,7 +274,7 @@ class SlowTee<OutputName, T> {
           ?.reject(new SlowTeeError("Cancel requested during a pending pull"));
         state.nextWaiters.delete(outputName);
 
-        this.exitBlockedIfNoBlockersRemain(state);
+        this.#exitBlockedIfNoBlockersRemain(state);
       },
     });
   }
@@ -283,24 +283,24 @@ class SlowTee<OutputName, T> {
    * If no blockers remain while in the blocked state, enter idle or initiate
    * a read depending on whether there are waiters for the next read.
    */
-  exitBlockedIfNoBlockersRemain(state: BlockedState<OutputName, T>): void {
+  #exitBlockedIfNoBlockersRemain(state: BlockedState<OutputName, T>): void {
     if (state.blockers.size > 0) return;
 
     // There are no blockers left. Exit the blocked state.
     if (state.nextWaiters.size === 0) {
       // There are no waiters for the next read either.
-      return this.enter({ id: "idle" });
+      return this.#enter({ id: "idle" });
     } else {
       // There are one or more waiters for the next read. Initiate a
       // read.
-      return this.enter({ id: "reading", waiters: state.nextWaiters });
+      return this.#enter({ id: "reading", waiters: state.nextWaiters });
     }
   }
 
   /**
    * Send a read result to an output by fulfilling the corresponding promise.
    */
-  fulfillPromise(
+  #fulfillPromise(
     outputName: OutputName,
     handler: PromiseHandler<T>,
     readResult: ReadResult<T>
