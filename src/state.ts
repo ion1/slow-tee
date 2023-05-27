@@ -5,7 +5,10 @@
  * - Reading
  * - Blocked
  */
-export type State<T> = IdleState | ReadingState<T> | BlockedState<T>;
+export type State<OutputName, T> =
+  | IdleState
+  | ReadingState<OutputName, T>
+  | BlockedState<OutputName, T>;
 
 /**
  * No output stream has pulled.
@@ -20,9 +23,9 @@ export type IdleState = {
  *
  * A read will be initiated upon entering this state.
  */
-export type ReadingState<T> = {
+export type ReadingState<OutputName, T> = {
   id: "reading";
-  waiters: Map<number, PromiseHandler<T>>;
+  waiters: Map<OutputName, PromiseHandler<T>>;
 };
 
 /**
@@ -34,11 +37,11 @@ export type ReadingState<T> = {
  * are referred to as the next waiters. They will be passed along when entering
  * the Reading state the next time.
  */
-export type BlockedState<T> = {
+export type BlockedState<OutputName, T> = {
   id: "blocked";
   readResult: ReadResult<T>;
-  blockers: Set<number>;
-  nextWaiters: Map<number, PromiseHandler<T>>;
+  blockers: Set<OutputName>;
+  nextWaiters: Map<OutputName, PromiseHandler<T>>;
 };
 
 /**
@@ -62,12 +65,12 @@ export type PromiseHandler<T> = {
   reject: (reason: any) => void;
 };
 
-export function dispatchState<T, R>(
-  state: State<T>,
+export function dispatchState<OutputName, T, R>(
+  state: State<OutputName, T>,
   handlers: {
     idle: (state: IdleState) => R;
-    reading: (state: ReadingState<T>) => R;
-    blocked: (state: BlockedState<T>) => R;
+    reading: (state: ReadingState<OutputName, T>) => R;
+    blocked: (state: BlockedState<OutputName, T>) => R;
   }
 ): R {
   switch (state.id) {
@@ -90,7 +93,9 @@ export function dispatchState<T, R>(
  * @param state - The SlowTee state.
  * @returns The string representation.
  */
-export function stateToString<T>(state: State<T>): string {
+export function stateToString<OutputName, T>(
+  state: State<OutputName, T>
+): string {
   switch (state.id) {
     case "idle":
       return "Idle";

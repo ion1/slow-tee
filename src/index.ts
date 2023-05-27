@@ -15,19 +15,24 @@ import {
  * pace of the slowest output, avoiding the possible unbounded memory usage of
  * ReadableStream tee().
  *
- * @param count - The number of outputs.
  * @param input - The input ReadableStream.
+ * @param outputNames - The names of the output streams.
  * @param queueingStrategy - Please see the queueingStrategy parameter for the
  *   ReadableStream constructor.
- * @returns An array of output ReadableStreams.
+ * @returns An object of ReadableStreams with a key for each given output name.
  */
-export function slowTee<T>(
-  count: number,
+export function slowTee<OutputName extends string | number | symbol, T>(
   input: ReadableStream<T>,
+  outputNames: OutputName[],
   queueingStrategy?: QueuingStrategy<T>
-): ReadableStream<T>[] {
-  const instance = new SlowTee(count, input, queueingStrategy);
-  return Array.from(instance.outputs.values());
+): Record<OutputName, ReadableStream<T>> {
+  const instance = new SlowTee(input, outputNames, queueingStrategy);
+
+  // Trust me, TypeScript.
+  return Object.fromEntries(instance.outputs) as Record<
+    OutputName,
+    ReadableStream<T>
+  >;
 }
 
 /**
@@ -35,17 +40,17 @@ export function slowTee<T>(
  * pace of the slowest output, avoiding the possible unbounded memory usage of
  * ReadableStream tee().
  */
-class SlowTee<T> {
+class SlowTee<OutputName extends string | number | symbol, T> {
   /** The input reader. */
   reader: ReadableStreamDefaultReader<T>;
   /** The ReadableStream values for the uncancelled outputs. */
-  outputs: Map<number, ReadableStream<T>>;
+  outputs: Map<OutputName, ReadableStream<T>>;
   /** The state of the finite state machine. */
-  state: State<T>;
+  state: State<OutputName, T>;
 
   constructor(
-    count: number,
     input: ReadableStream<T>,
+    outputNames: OutputName[],
     queueingStrategy?: QueuingStrategy<T>
   ) {
     this.reader = input.getReader();
@@ -53,11 +58,11 @@ class SlowTee<T> {
     // Construct a ReadableStream for each output.
     this.outputs = new Map();
 
-    for (let ix = 0; ix < count; ++ix) {
+    for (const outputName of outputNames) {
       const stream = new ReadableStream<T>(
         {
           pull: async (controller) => {
-            const { value, done } = await this.pull(ix);
+            const { value, done } = await this.pull(outputName);
 
             if (done) {
               controller.close();
@@ -67,13 +72,13 @@ class SlowTee<T> {
             controller.enqueue(value);
           },
           cancel: () => {
-            this.cancel(ix);
+            this.cancel(outputName);
           },
         },
         queueingStrategy
       );
 
-      this.outputs.set(ix, stream);
+      this.outputs.set(outputName, stream);
     }
 
     this.state = { id: "idle" };
@@ -85,7 +90,7 @@ class SlowTee<T> {
    * Enter the given state. Runs possible on-entry actions and updates the
    * state member variable.
    */
-  enter(state: State<T>): void {
+  enter(state: State<OutputName, T>): void {
     if (debugging)
       console.debug(`SlowTee: Entering state: ${stateToString(state)}`);
 
@@ -144,12 +149,12 @@ class SlowTee<T> {
     const nextBlockers = new Set(this.outputs.keys());
 
     // Immediately fulfill the pulls for the waiters.
-    for (const [ix, handler] of this.state.waiters) {
-      this.fulfillPromise(ix, handler, result);
+    for (const [outputName, handler] of this.state.waiters) {
+      this.fulfillPromise(outputName, handler, result);
 
       // These waiters will not be blockers in the next state as their pulls
       // have already been fulfilled.
-      nextBlockers.delete(ix);
+      nextBlockers.delete(outputName);
 
       // There is no need to delete the waiters from the map because the map
       // will be discarded on the next state transition.
@@ -173,8 +178,9 @@ class SlowTee<T> {
   /**
    * To be called when one of the outputs is trying to pull.
    */
-  pull(ix: number): Promise<ReadableStreamReadResult<T>> {
-    if (debugging) console.debug(`SlowTee: Pull from output ix=${ix}`);
+  pull(outputName: OutputName): Promise<ReadableStreamReadResult<T>> {
+    if (debugging)
+      console.debug(`SlowTee: Pull from output ${JSON.stringify(outputName)}`);
 
     return new Promise((resolve, reject) => {
       const handler = { resolve, reject };
@@ -183,41 +189,45 @@ class SlowTee<T> {
         idle: () => {
           // Initiate a read.
 
-          const waiters = new Map([[ix, handler]]);
+          const waiters = new Map([[outputName, handler]]);
 
           this.enter({ id: "reading", waiters });
         },
         reading: (state) => {
           // A read has already been initiated. Just add to the waiters.
 
-          if (state.waiters.has(ix))
+          if (state.waiters.has(outputName))
             throw new SlowTeeError(
-              `There is already a waiter with ix=${ix}. State: ` +
+              `There is already a waiter with the name ` +
+                JSON.stringify(outputName) +
+                `. State: ` +
                 stateToString(state)
             );
 
-          state.waiters.set(ix, handler);
+          state.waiters.set(outputName, handler);
         },
         blocked: (state) => {
-          if (state.blockers.has(ix)) {
+          if (state.blockers.has(outputName)) {
             // The output was a blocker. Fulfill the pull and mark the output
             // as not a blocker.
 
-            state.blockers.delete(ix);
+            state.blockers.delete(outputName);
 
-            this.fulfillPromise(ix, handler, state.readResult);
+            this.fulfillPromise(outputName, handler, state.readResult);
           } else {
             // The output was not a blocker. It has already received the
             // current read result and wants the result from the next read. Add
             // it as a next waiter.
 
-            if (state.nextWaiters.has(ix))
+            if (state.nextWaiters.has(outputName))
               throw new SlowTeeError(
-                `There is already a nextWaiter with ix=${ix}. State: ` +
+                `There is already a nextWaiter with the name ` +
+                  JSON.stringify(outputName) +
+                  `. State: ` +
                   stateToString(state)
               );
 
-            state.nextWaiters.set(ix, handler);
+            state.nextWaiters.set(outputName, handler);
           }
 
           return this.exitBlockedIfNoBlockersRemain(state);
@@ -229,11 +239,13 @@ class SlowTee<T> {
   /**
    * To be called when one of the outputs wants to cancel.
    */
-  cancel(ix: number): void {
+  cancel(outputName: OutputName): void {
     if (debugging)
-      console.debug(`SlowTee: Cancel request from output ix=${ix}`);
+      console.debug(
+        `SlowTee: Cancel request from output ${JSON.stringify(outputName)}`
+      );
 
-    this.outputs.delete(ix);
+    this.outputs.delete(outputName);
 
     dispatchState(this.state, {
       idle: () => {
@@ -241,17 +253,17 @@ class SlowTee<T> {
       },
       reading: (state) => {
         state.waiters
-          .get(ix)
+          .get(outputName)
           ?.reject(new SlowTeeError("Cancel requested during a pending pull"));
-        state.waiters.delete(ix);
+        state.waiters.delete(outputName);
       },
       blocked: (state) => {
-        state.blockers.delete(ix);
+        state.blockers.delete(outputName);
 
         state.nextWaiters
-          .get(ix)
+          .get(outputName)
           ?.reject(new SlowTeeError("Cancel requested during a pending pull"));
-        state.nextWaiters.delete(ix);
+        state.nextWaiters.delete(outputName);
 
         this.exitBlockedIfNoBlockersRemain(state);
       },
@@ -262,7 +274,7 @@ class SlowTee<T> {
    * If no blockers remain while in the blocked state, enter idle or initiate
    * a read depending on whether there are waiters for the next read.
    */
-  exitBlockedIfNoBlockersRemain(state: BlockedState<T>): void {
+  exitBlockedIfNoBlockersRemain(state: BlockedState<OutputName, T>): void {
     if (state.blockers.size > 0) return;
 
     // There are no blockers left. Exit the blocked state.
@@ -280,13 +292,13 @@ class SlowTee<T> {
    * Send a read result to an output by fulfilling the corresponding promise.
    */
   fulfillPromise(
-    ix: number,
+    outputName: OutputName,
     handler: PromiseHandler<T>,
     readResult: ReadResult<T>
   ): void {
     if (debugging)
       console.debug(
-        `SlowTee: Sending to output ix=${ix}:`,
+        `SlowTee: Sending to output ${JSON.stringify(outputName)}:`,
         readResultToString(readResult)
       );
 
