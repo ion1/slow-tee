@@ -17,22 +17,23 @@ import {
  *
  * @param input - The input ReadableStream.
  * @param outputNames - The names of the output streams.
- * @param queueingStrategy - Please see the queueingStrategy parameter for the
+ * @param queuingStrategy - Please see the queuingStrategy parameter for the
  *   ReadableStream constructor.
  * @returns An object of ReadableStreams with a key for each given output name.
  */
 export function slowTee<OutputName extends string | number | symbol, T>(
   input: ReadableStream<T>,
   outputNames: OutputName[],
-  queueingStrategy?: QueuingStrategy<T>
+  queuingStrategy?: QueuingStrategy<T>
 ): Record<OutputName, ReadableStream<T>> {
-  const instance = new SlowTee(input, outputNames, queueingStrategy);
+  const instance = new SlowTee(input);
 
-  // Trust me, TypeScript.
-  return Object.fromEntries(instance.outputs) as Record<
-    OutputName,
-    ReadableStream<T>
-  >;
+  const streams = {} as Record<OutputName, ReadableStream<T>>;
+  for (const outputName of outputNames) {
+    streams[outputName] = instance.addOutputStream(outputName, queuingStrategy);
+  }
+
+  return streams;
 }
 
 /**
@@ -40,7 +41,7 @@ export function slowTee<OutputName extends string | number | symbol, T>(
  * pace of the slowest output, avoiding the possible unbounded memory usage of
  * ReadableStream tee().
  */
-class SlowTee<OutputName extends string | number | symbol, T> {
+class SlowTee<OutputName, T> {
   /** The input reader. */
   reader: ReadableStreamDefaultReader<T>;
   /** The ReadableStream values for the uncancelled outputs. */
@@ -48,42 +49,50 @@ class SlowTee<OutputName extends string | number | symbol, T> {
   /** The state of the finite state machine. */
   state: State<OutputName, T>;
 
-  constructor(
-    input: ReadableStream<T>,
-    outputNames: OutputName[],
-    queueingStrategy?: QueuingStrategy<T>
-  ) {
+  constructor(input: ReadableStream<T>) {
     this.reader = input.getReader();
 
-    // Construct a ReadableStream for each output.
     this.outputs = new Map();
-
-    for (const outputName of outputNames) {
-      const stream = new ReadableStream<T>(
-        {
-          pull: async (controller) => {
-            const { value, done } = await this.pull(outputName);
-
-            if (done) {
-              controller.close();
-              return;
-            }
-
-            controller.enqueue(value);
-          },
-          cancel: () => {
-            this.cancel(outputName);
-          },
-        },
-        queueingStrategy
-      );
-
-      this.outputs.set(outputName, stream);
-    }
 
     this.state = { id: "idle" };
     if (debugging)
       console.debug(`SlowTee: State: ${stateToString(this.state)}`);
+  }
+
+  /**
+   * Create a ReadableStream and add it to the outputs.
+   */
+  addOutputStream(
+    outputName: OutputName,
+    queuingStrategy?: QueuingStrategy<T>
+  ): ReadableStream<T> {
+    if (this.outputs.has(outputName))
+      throw new SlowTeeError(
+        `Output already exists with the name ${JSON.stringify(outputName)}`
+      );
+
+    const stream = new ReadableStream<T>(
+      {
+        pull: async (controller) => {
+          const { value, done } = await this.pull(outputName);
+
+          if (done) {
+            controller.close();
+            return;
+          }
+
+          controller.enqueue(value);
+        },
+        cancel: () => {
+          this.cancel(outputName);
+        },
+      },
+      queuingStrategy
+    );
+
+    this.outputs.set(outputName, stream);
+
+    return stream;
   }
 
   /**
