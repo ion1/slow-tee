@@ -65,6 +65,13 @@ export type PromiseHandler<T> = {
   reject: (reason: any) => void;
 };
 
+/**
+ * Run the appropriate handler given the state.
+ *
+ * @param state - The current state.
+ * @param handlers - A handler for each possible state.
+ * @returns The return value from the handler.
+ */
 export function dispatchState<OutputName, T, R>(
   state: State<OutputName, T>,
   handlers: {
