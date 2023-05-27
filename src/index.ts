@@ -207,7 +207,7 @@ class SlowTee<OutputName, T> {
 
           if (state.waiters.has(outputName))
             throw new SlowTeeError(
-              `There is already a waiter with the name ` +
+              `Waiter already exists with the name ` +
                 JSON.stringify(outputName) +
                 `. State: ` +
                 stateToString(state)
@@ -230,7 +230,7 @@ class SlowTee<OutputName, T> {
 
             if (state.nextWaiters.has(outputName))
               throw new SlowTeeError(
-                `There is already a nextWaiter with the name ` +
+                `NextWaiter already exists with the name ` +
                   JSON.stringify(outputName) +
                   `. State: ` +
                   stateToString(state)
